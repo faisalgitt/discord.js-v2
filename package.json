@@ -1,0 +1,46 @@
+{
+  "name": "discord.js-v2",
+  "version": "1.0.0",
+  "description": "Production-ready Components V2 utilities for Discord.js v14 bots — typed builders, presets, pagination, modals, and flow helpers.",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./src/index.js",
+      "types": "./src/index.d.ts"
+    }
+  },
+  "scripts": {
+    "test": "node tests/index.test.js",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "discord",
+    "discord.js",
+    "components-v2",
+    "discord-components",
+    "discord-bot",
+    "builder",
+    "pagination",
+    "utility"
+  ],
+  "author": "kopeekool",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faisalgitt/discord.js-v2.git"
+  },
+  "homepage": "https://github.com/faisalgitt/discord.js-v2#readme",
+  "bugs": {
+    "url": "https://github.com/faisalgitt/discord.js-v2/issues"
+  },
+  "peerDependencies": {
+    "discord.js": "^14.0.0"
+  },
+  "devDependencies": {
+    "discord.js": "^14.16.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
