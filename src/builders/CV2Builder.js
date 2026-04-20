@@ -8,14 +8,28 @@ const {
   ThumbnailBuilder,
   ButtonBuilder,
   ActionRowBuilder,
-  ComponentType,
+  MediaGalleryBuilder,
+  MediaGalleryItemBuilder,
+  FileBuilder,
   ButtonStyle,
   SeparatorSpacingSize,
+  MessageFlags,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+  UserSelectMenuBuilder,
+  RoleSelectMenuBuilder,
+  ChannelSelectMenuBuilder,
+  MentionableSelectMenuBuilder,
+  ChannelType,
 } = require('discord.js');
 
+const { ComponentTypes, ContainerAddMethodMap } = require('../types/constants');
+
 /**
- * CV2Builder — fluent, chainable Components V2 container builder
- * The core utility of discord.js-v2
+ * CV2Builder — fully-featured fluent Components V2 container builder
+ *
+ * Supports: text, separators, sections, buttons, select menus,
+ * media galleries, files, and raw components. Full color + spoiler support.
  */
 class CV2Builder {
   constructor() {
@@ -23,187 +37,288 @@ class CV2Builder {
     this._components = [];
     this._accentColor = null;
     this._spoiler = false;
+    this._id = `cv2_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
   }
 
+  // ─── Color & Spoiler ─────────────────────────────────────────────────────────
+
   /**
-   * Set accent color on the container
-   * @param {number|string} color - Hex color or integer
+   * Set accent color
+   * @param {number|string} color - Integer or '#RRGGBB'
    */
   setColor(color) {
-    if (typeof color === 'string') {
-      color = parseInt(color.replace('#', ''), 16);
-    }
-    this._accentColor = color;
+    this._accentColor = typeof color === 'string'
+      ? parseInt(color.replace('#', ''), 16)
+      : color;
     return this;
   }
 
-  /**
-   * Set spoiler on the container
-   */
+  /** Enable spoiler on container */
   setSpoiler(value = true) {
     this._spoiler = value;
     return this;
   }
 
+  // ─── Text ─────────────────────────────────────────────────────────────────────
+
   /**
-   * Add a text display component
-   * @param {string} content - Markdown content
+   * Add a text display block (supports full Discord markdown)
+   * @param {string} content
    */
   addText(content) {
-    if (!content || typeof content !== 'string') throw new TypeError('CV2Builder#addText: content must be a non-empty string');
+    if (!content || typeof content !== 'string') {
+      throw new TypeError('CV2Builder#addText: content must be a non-empty string');
+    }
     this._components.push(new TextDisplayBuilder().setContent(content));
     return this;
   }
 
   /**
-   * Add a separator
-   * @param {object} options
-   * @param {boolean} [options.divider=true]
-   * @param {'small'|'large'} [options.spacing='small']
+   * Add multiple text blocks at once
+   * @param {...string} lines
    */
-  addSeparator({ divider = true, spacing = 'small' } = {}) {
-    const sep = new SeparatorBuilder()
-      .setDivider(divider)
-      .setSpacing(spacing === 'large' ? SeparatorSpacingSize.Large : SeparatorSpacingSize.Small);
-    this._components.push(sep);
+  addLines(...lines) {
+    for (const line of lines) this.addText(line);
     return this;
   }
 
+  // ─── Separator ───────────────────────────────────────────────────────────────
+
   /**
-   * Add a section with optional thumbnail
-   * @param {object} options
-   * @param {string} options.text - Section text content
-   * @param {string} [options.thumbnail] - Thumbnail image URL
-   * @param {object} [options.button] - Optional accessory button { label, customId, style, emoji }
+   * Add a separator
+   * @param {object} [opts]
+   * @param {boolean} [opts.divider=true]
+   * @param {'small'|'large'} [opts.spacing='small']
    */
-  addSection({ text, thumbnail, button } = {}) {
+  addSeparator({ divider = true, spacing = 'small' } = {}) {
+    this._components.push(
+      new SeparatorBuilder()
+        .setDivider(divider)
+        .setSpacing(spacing === 'large' ? SeparatorSpacingSize.Large : SeparatorSpacingSize.Small)
+    );
+    return this;
+  }
+
+  /** Spacer (separator without divider line) */
+  addSpacer(spacing = 'small') {
+    return this.addSeparator({ divider: false, spacing });
+  }
+
+  // ─── Section ─────────────────────────────────────────────────────────────────
+
+  /**
+   * Add a section with optional thumbnail or button accessory
+   * @param {object} opts
+   * @param {string} opts.text
+   * @param {string} [opts.thumbnail] - Image URL for thumbnail accessory
+   * @param {boolean} [opts.thumbnailSpoiler]
+   * @param {string} [opts.thumbnailAlt]
+   * @param {object} [opts.button] - { label, customId, style, emoji, url, disabled }
+   */
+  addSection({ text, thumbnail, thumbnailSpoiler, thumbnailAlt, button } = {}) {
     if (!text) throw new TypeError('CV2Builder#addSection: text is required');
 
     const section = new SectionBuilder()
       .addTextDisplayComponents(new TextDisplayBuilder().setContent(text));
 
     if (thumbnail) {
-      section.setThumbnailAccessory(new ThumbnailBuilder().setURL(thumbnail));
+      const t = new ThumbnailBuilder().setURL(thumbnail);
+      if (thumbnailSpoiler) t.setSpoiler(true);
+      if (thumbnailAlt) t.setDescription(thumbnailAlt);
+      section.setThumbnailAccessory(t);
     } else if (button) {
-      const btn = new ButtonBuilder()
-        .setLabel(button.label || 'Click')
-        .setCustomId(button.customId || 'cv2_section_btn')
-        .setStyle(this._resolveButtonStyle(button.style));
-      if (button.emoji) btn.setEmoji(button.emoji);
-      section.setButtonAccessory(btn);
+      section.setButtonAccessory(this._buildButton(button));
     }
 
     this._components.push(section);
     return this;
   }
 
+  // ─── Buttons ─────────────────────────────────────────────────────────────────
+
   /**
-   * Add a row of buttons (max 5)
+   * Add an action row of buttons (max 5)
    * @param {Array<{label, customId, style, emoji, disabled, url}>} buttons
    */
   addButtons(buttons = []) {
-    if (!Array.isArray(buttons) || buttons.length === 0) throw new TypeError('CV2Builder#addButtons: buttons must be a non-empty array');
-    if (buttons.length > 5) throw new RangeError('CV2Builder#addButtons: max 5 buttons per row');
-
-    const row = new ActionRowBuilder();
-    for (const btn of buttons) {
-      const b = new ButtonBuilder()
-        .setLabel(btn.label || 'Button')
-        .setStyle(this._resolveButtonStyle(btn.style));
-
-      if (btn.style === 'Link' || btn.style === 5) {
-        b.setURL(btn.url || 'https://discord.com');
-      } else {
-        b.setCustomId(btn.customId || `cv2_btn_${Math.random().toString(36).slice(2, 8)}`);
-      }
-
-      if (btn.emoji) b.setEmoji(btn.emoji);
-      if (btn.disabled) b.setDisabled(true);
-
-      row.addComponents(b);
+    if (!Array.isArray(buttons) || buttons.length === 0) {
+      throw new TypeError('CV2Builder#addButtons: buttons must be a non-empty array');
     }
-
+    if (buttons.length > 5) {
+      throw new RangeError('CV2Builder#addButtons: max 5 buttons per row');
+    }
+    const row = new ActionRowBuilder();
+    row.addComponents(...buttons.map(b => this._buildButton(b)));
     this._components.push(row);
     return this;
   }
 
   /**
-   * Add raw discord.js component (TextDisplayBuilder, SectionBuilder, etc.)
-   * @param {object} component
+   * Add multiple button rows (auto-splits into rows of 5)
+   * @param {Array<object>} buttons
    */
+  addButtonRows(buttons = []) {
+    if (!Array.isArray(buttons) || buttons.length === 0) {
+      throw new TypeError('CV2Builder#addButtonRows: buttons must be a non-empty array');
+    }
+    for (let i = 0; i < buttons.length; i += 5) {
+      this.addButtons(buttons.slice(i, i + 5));
+    }
+    return this;
+  }
+
+  // ─── Select Menus ─────────────────────────────────────────────────────────────
+
+  /**
+   * Add a string select menu
+   * @param {object} opts
+   * @param {string} opts.customId
+   * @param {string} [opts.placeholder]
+   * @param {number} [opts.minValues=1]
+   * @param {number} [opts.maxValues=1]
+   * @param {boolean} [opts.disabled]
+   * @param {Array<{label, value, description?, emoji?, default?}>} opts.options
+   */
+  addStringSelect({ customId, placeholder, minValues = 1, maxValues = 1, disabled, options = [] } = {}) {
+    if (!customId) throw new TypeError('CV2Builder#addStringSelect: customId is required');
+    if (!options.length) throw new TypeError('CV2Builder#addStringSelect: options cannot be empty');
+
+    const menu = new StringSelectMenuBuilder()
+      .setCustomId(customId)
+      .setMinValues(minValues)
+      .setMaxValues(maxValues)
+      .addOptions(options.map(o => {
+        const opt = new StringSelectMenuOptionBuilder()
+          .setLabel(o.label)
+          .setValue(o.value);
+        if (o.description) opt.setDescription(o.description);
+        if (o.emoji) opt.setEmoji(o.emoji);
+        if (o.default) opt.setDefault(true);
+        return opt;
+      }));
+
+    if (placeholder) menu.setPlaceholder(placeholder);
+    if (disabled) menu.setDisabled(true);
+
+    this._components.push(new ActionRowBuilder().addComponents(menu));
+    return this;
+  }
+
+  /**
+   * Add a user select menu
+   * @param {object} opts
+   * @param {string} opts.customId
+   * @param {string} [opts.placeholder]
+   * @param {number} [opts.minValues]
+   * @param {number} [opts.maxValues]
+   * @param {boolean} [opts.disabled]
+   */
+  addUserSelect({ customId, placeholder, minValues = 1, maxValues = 1, disabled } = {}) {
+    if (!customId) throw new TypeError('CV2Builder#addUserSelect: customId is required');
+    const menu = new UserSelectMenuBuilder().setCustomId(customId).setMinValues(minValues).setMaxValues(maxValues);
+    if (placeholder) menu.setPlaceholder(placeholder);
+    if (disabled) menu.setDisabled(true);
+    this._components.push(new ActionRowBuilder().addComponents(menu));
+    return this;
+  }
+
+  /**
+   * Add a role select menu
+   */
+  addRoleSelect({ customId, placeholder, minValues = 1, maxValues = 1, disabled } = {}) {
+    if (!customId) throw new TypeError('CV2Builder#addRoleSelect: customId is required');
+    const menu = new RoleSelectMenuBuilder().setCustomId(customId).setMinValues(minValues).setMaxValues(maxValues);
+    if (placeholder) menu.setPlaceholder(placeholder);
+    if (disabled) menu.setDisabled(true);
+    this._components.push(new ActionRowBuilder().addComponents(menu));
+    return this;
+  }
+
+  /**
+   * Add a channel select menu
+   */
+  addChannelSelect({ customId, placeholder, channelTypes, minValues = 1, maxValues = 1, disabled } = {}) {
+    if (!customId) throw new TypeError('CV2Builder#addChannelSelect: customId is required');
+    const menu = new ChannelSelectMenuBuilder().setCustomId(customId).setMinValues(minValues).setMaxValues(maxValues);
+    if (placeholder) menu.setPlaceholder(placeholder);
+    if (channelTypes) menu.addChannelTypes(...channelTypes);
+    if (disabled) menu.setDisabled(true);
+    this._components.push(new ActionRowBuilder().addComponents(menu));
+    return this;
+  }
+
+  // ─── Media ────────────────────────────────────────────────────────────────────
+
+  /**
+   * Add a media gallery (1-10 images)
+   * @param {Array<{url, description?, spoiler?}>} items
+   */
+  addMediaGallery(items = []) {
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new TypeError('CV2Builder#addMediaGallery: items must be a non-empty array');
+    }
+    if (items.length > 10) throw new RangeError('CV2Builder#addMediaGallery: max 10 items');
+
+    const gallery = new MediaGalleryBuilder();
+    gallery.addItems(...items.map(item => {
+      const i = new MediaGalleryItemBuilder().setURL(item.url);
+      if (item.description) i.setDescription(item.description);
+      if (item.spoiler) i.setSpoiler(true);
+      return i;
+    }));
+
+    this._components.push(gallery);
+    return this;
+  }
+
+  /**
+   * Add a file component
+   * @param {string} url - Attachment URL (e.g. 'attachment://file.pdf')
+   * @param {boolean} [spoiler]
+   */
+  addFile(url, spoiler = false) {
+    if (!url) throw new TypeError('CV2Builder#addFile: url is required');
+    const f = new FileBuilder().setURL(url);
+    if (spoiler) f.setSpoiler(true);
+    this._components.push(f);
+    return this;
+  }
+
+  // ─── Raw ────────────────────────────────────────────────────────────────────
+
+  /** Add a raw discord.js component directly */
   addRaw(component) {
+    if (!component) throw new TypeError('CV2Builder#addRaw: component is required');
     this._components.push(component);
     return this;
   }
+
+  // ─── Build ────────────────────────────────────────────────────────────────────
 
   /**
    * Build and return the ContainerBuilder
    * @returns {ContainerBuilder}
    */
   build() {
-    if (this._components.length === 0) throw new Error('CV2Builder#build: no components added');
+    if (this._components.length === 0) {
+      throw new Error('CV2Builder#build: cannot build an empty container');
+    }
 
     for (const comp of this._components) {
       this._addToContainer(comp);
     }
 
-    if (this._accentColor !== null) {
-      this._container.setAccentColor(this._accentColor);
-    }
-
-    if (this._spoiler) {
-      this._container.setSpoiler(true);
-    }
+    if (this._accentColor !== null) this._container.setAccentColor(this._accentColor);
+    if (this._spoiler) this._container.setSpoiler(true);
 
     return this._container;
   }
 
   /**
-   * Route component to correct typed add method on ContainerBuilder
-   * @param {object} comp
-   */
-  _addToContainer(comp) {
-    const type = comp?.data?.type;
-    switch (type) {
-      case 10: // TextDisplay
-        this._container.addTextDisplayComponents(comp);
-        break;
-      case 14: // Separator
-        this._container.addSeparatorComponents(comp);
-        break;
-      case 9:  // Section
-        this._container.addSectionComponents(comp);
-        break;
-      case 1:  // ActionRow
-        this._container.addActionRowComponents(comp);
-        break;
-      case 12: // MediaGallery
-        this._container.addMediaGalleryComponents(comp);
-        break;
-      case 13: // File
-        this._container.addFileComponents(comp);
-        break;
-      default:
-        // Fallback: try all typed methods
-        try { this._container.addTextDisplayComponents(comp); } catch (_) {
-          try { this._container.addSectionComponents(comp); } catch (_) {
-            try { this._container.addSeparatorComponents(comp); } catch (_) {
-              try { this._container.addActionRowComponents(comp); } catch (e) {
-                throw new Error(`CV2Builder#build: unsupported component type ${type}: ${e.message}`);
-              }
-            }
-          }
-        }
-    }
-  }
-
-  /**
-   * Build and return as a ready reply/send options object
-   * @param {object} [extra] - Extra options to merge (ephemeral, etc.)
-   * @returns {{ components: ContainerBuilder[], flags: number }}
+   * Build into a reply/send options object (IsComponentsV2 flag set)
+   * @param {object} [extra] - Extra properties to spread
    */
   toReply(extra = {}) {
-    const { MessageFlags } = require('discord.js');
     return {
       components: [this.build()],
       flags: MessageFlags.IsComponentsV2,
@@ -211,33 +326,76 @@ class CV2Builder {
     };
   }
 
-  /**
-   * Build ephemeral reply
-   */
-  toEphemeral() {
-    const { MessageFlags } = require('discord.js');
+  /** Build ephemeral reply payload */
+  toEphemeral(extra = {}) {
     return {
       components: [this.build()],
       flags: MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral,
+      ...extra,
     };
   }
 
-  // ─── Internal ────────────────────────────────────────────────────────────────
+  /**
+   * Clone this builder (create a fresh copy with same config)
+   * @returns {CV2Builder}
+   */
+  clone() {
+    const c = new CV2Builder();
+    c._components = [...this._components];
+    c._accentColor = this._accentColor;
+    c._spoiler = this._spoiler;
+    return c;
+  }
 
-  _resolveButtonStyle(style) {
-    const { ButtonStyle } = require('discord.js');
+  /** Get component count */
+  get size() {
+    return this._components.length;
+  }
+
+  // ─── Internal ─────────────────────────────────────────────────────────────────
+
+  _addToContainer(comp) {
+    const type = comp?.data?.type;
+    const method = ContainerAddMethodMap[type];
+    if (method) {
+      this._container[method](comp);
+    } else {
+      // Fallback: try all methods
+      const methods = ['addTextDisplayComponents','addSectionComponents','addSeparatorComponents',
+        'addActionRowComponents','addMediaGalleryComponents','addFileComponents'];
+      let added = false;
+      for (const m of methods) {
+        try { this._container[m](comp); added = true; break; } catch (_) {}
+      }
+      if (!added) throw new Error(`CV2Builder: unsupported component type ${type}`);
+    }
+  }
+
+  _buildButton({ label, customId, style, emoji, disabled, url } = {}) {
+    const btn = new ButtonBuilder()
+      .setLabel(label || 'Button')
+      .setStyle(this._resolveStyle(style));
+
+    const resolvedStyle = this._resolveStyle(style);
+    if (resolvedStyle === ButtonStyle.Link) {
+      btn.setURL(url || 'https://discord.com');
+    } else {
+      btn.setCustomId(customId || `cv2_btn_${Math.random().toString(36).slice(2, 8)}`);
+    }
+
+    if (emoji) btn.setEmoji(emoji);
+    if (disabled) btn.setDisabled(true);
+    return btn;
+  }
+
+  _resolveStyle(style) {
     if (typeof style === 'number') return style;
     const map = {
-      Primary: ButtonStyle.Primary,
-      Secondary: ButtonStyle.Secondary,
-      Success: ButtonStyle.Success,
-      Danger: ButtonStyle.Danger,
+      Primary: ButtonStyle.Primary, Blurple: ButtonStyle.Primary,
+      Secondary: ButtonStyle.Secondary, Grey: ButtonStyle.Secondary, Gray: ButtonStyle.Secondary,
+      Success: ButtonStyle.Success, Green: ButtonStyle.Success,
+      Danger: ButtonStyle.Danger, Red: ButtonStyle.Danger,
       Link: ButtonStyle.Link,
-      Blurple: ButtonStyle.Primary,
-      Grey: ButtonStyle.Secondary,
-      Gray: ButtonStyle.Secondary,
-      Green: ButtonStyle.Success,
-      Red: ButtonStyle.Danger,
     };
     return map[style] ?? ButtonStyle.Secondary;
   }

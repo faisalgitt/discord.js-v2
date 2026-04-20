@@ -2,97 +2,126 @@
 
 const CV2Builder = require('./CV2Builder');
 const { MessageFlags } = require('discord.js');
+const { uniqueId } = require('../utils/index');
 
 /**
- * ConfirmCV2 — Components V2 confirmation dialog
- * Ask user to confirm/cancel an action with a clean CV2 UI
+ * ConfirmCV2 — advanced confirmation dialog
+ *
+ * Features:
+ * - Confirm / Cancel / Custom buttons
+ * - Optional countdown display
+ * - Restrict to interaction user or custom userId
+ * - Returns result + the button interaction for followups
  */
 class ConfirmCV2 {
   /**
-   * @param {object} options
-   * @param {string} options.question - The confirmation prompt text
-   * @param {string} [options.confirmLabel='✅ Confirm']
-   * @param {string} [options.cancelLabel='❌ Cancel']
-   * @param {number} [options.timeout=30000]
-   * @param {string} [options.userId] - Restrict to specific user
-   * @param {number|string} [options.color]
-   * @param {boolean} [options.ephemeral=true]
+   * @param {object} opts
+   * @param {string} opts.question - The prompt text
+   * @param {string} [opts.confirmLabel='✅ Confirm']
+   * @param {string} [opts.cancelLabel='❌ Cancel']
+   * @param {string} [opts.confirmStyle='Success']
+   * @param {string} [opts.cancelStyle='Danger']
+   * @param {number} [opts.timeout=30000]
+   * @param {string} [opts.userId]
+   * @param {number|string} [opts.color]
+   * @param {boolean} [opts.ephemeral=true]
+   * @param {boolean} [opts.showTimeout=false] - Show timeout seconds in footer
+   * @param {string} [opts.confirmedText='✅ Confirmed.']
+   * @param {string} [opts.cancelledText='❌ Cancelled.']
+   * @param {string} [opts.timedOutText='-# ⏱ Confirmation timed out.']
    */
-  constructor(options = {}) {
-    if (!options.question) throw new TypeError('ConfirmCV2: question is required');
+  constructor(opts = {}) {
+    if (!opts.question) throw new TypeError('ConfirmCV2: question is required');
 
-    this.question = options.question;
-    this.confirmLabel = options.confirmLabel ?? '✅ Confirm';
-    this.cancelLabel = options.cancelLabel ?? '❌ Cancel';
-    this.timeout = options.timeout ?? 30_000;
-    this.userId = options.userId ?? null;
-    this.color = options.color ?? null;
-    this.ephemeral = options.ephemeral ?? true;
+    this.question = opts.question;
+    this.confirmLabel = opts.confirmLabel ?? '✅ Confirm';
+    this.cancelLabel  = opts.cancelLabel  ?? '❌ Cancel';
+    this.confirmStyle = opts.confirmStyle ?? 'Success';
+    this.cancelStyle  = opts.cancelStyle  ?? 'Danger';
+    this.timeout      = opts.timeout      ?? 30_000;
+    this.userId       = opts.userId       ?? null;
+    this.color        = opts.color        ?? null;
+    this.ephemeral    = opts.ephemeral    ?? true;
+    this.showTimeout  = opts.showTimeout  ?? false;
 
-    this._id = `confirm_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    this.confirmedText = opts.confirmedText ?? '✅ Confirmed.';
+    this.cancelledText = opts.cancelledText ?? '❌ Cancelled.';
+    this.timedOutText  = opts.timedOutText  ?? '-# ⏱ Confirmation timed out.';
+
+    this._id = uniqueId('conf');
   }
 
   /**
-   * Send confirmation and wait for response
+   * Ask the confirmation question
    * @param {import('discord.js').ChatInputCommandInteraction} interaction
-   * @returns {Promise<boolean>} true = confirmed, false = cancelled/timed out
+   * @returns {Promise<{ confirmed: boolean, interaction: import('discord.js').ButtonInteraction | null }>}
    */
   async ask(interaction) {
-    const builder = new CV2Builder();
-    if (this.color) builder.setColor(this.color);
-
-    builder
-      .addText(this.question)
-      .addSeparator()
-      .addButtons([
-        { label: this.confirmLabel, customId: `${this._id}_yes`, style: 'Success' },
-        { label: this.cancelLabel, customId: `${this._id}_no`, style: 'Danger' },
-      ]);
-
-    const payload = {
-      components: [builder.build()],
-      flags: this.ephemeral
-        ? MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
-        : MessageFlags.IsComponentsV2,
-      fetchReply: true,
-    };
+    const restrictTo = this.userId ?? interaction.user.id;
+    const payload = this._buildPayload();
 
     let message;
     if (interaction.deferred || interaction.replied) {
-      message = await interaction.editReply(payload);
+      message = await interaction.editReply({ ...payload, fetchReply: true });
     } else {
-      message = await interaction.reply(payload);
+      message = await interaction.reply({ ...payload, fetchReply: true });
     }
 
     return new Promise((resolve) => {
       const collector = message.createMessageComponentCollector({
-        filter: (i) => {
-          const validId = i.customId.startsWith(this._id);
-          const validUser = this.userId ? i.user.id === this.userId : i.user.id === interaction.user.id;
-          return validId && validUser;
-        },
+        filter: (i) => i.customId.startsWith(this._id) && i.user.id === restrictTo,
         time: this.timeout,
         max: 1,
       });
 
       collector.on('collect', async (i) => {
         const confirmed = i.customId.endsWith('_yes');
-        const responseBuilder = new CV2Builder();
-        if (this.color) responseBuilder.setColor(this.color);
-        responseBuilder.addText(confirmed ? '✅ Confirmed.' : '❌ Cancelled.');
-
-        await i.update({
-          components: [responseBuilder.build()],
-          flags: MessageFlags.IsComponentsV2,
-        });
-
-        resolve(confirmed);
+        const responseText = confirmed ? this.confirmedText : this.cancelledText;
+        const b = this._resultBuilder(responseText);
+        await i.update({ components: [b.build()], flags: MessageFlags.IsComponentsV2 });
+        resolve({ confirmed, interaction: i });
       });
 
-      collector.on('end', (collected) => {
-        if (collected.size === 0) resolve(false);
+      collector.on('end', async (collected) => {
+        if (collected.size === 0) {
+          try {
+            const b = this._resultBuilder(this.timedOutText);
+            await message.edit({ components: [b.build()], flags: MessageFlags.IsComponentsV2 });
+          } catch (_) {}
+          resolve({ confirmed: false, interaction: null });
+        }
       });
     });
+  }
+
+  // ─── Internal ─────────────────────────────────────────────────────────────────
+
+  _buildPayload() {
+    const b = new CV2Builder();
+    if (this.color) b.setColor(this.color);
+    b.addText(this.question);
+    if (this.showTimeout) {
+      b.addSeparator({ divider: false });
+      b.addText(`-# Expires in ${Math.round(this.timeout / 1000)}s`);
+    }
+    b.addSeparator();
+    b.addButtons([
+      { label: this.confirmLabel, customId: `${this._id}_yes`, style: this.confirmStyle },
+      { label: this.cancelLabel,  customId: `${this._id}_no`,  style: this.cancelStyle  },
+    ]);
+    return {
+      components: [b.build()],
+      flags: this.ephemeral
+        ? MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
+        : MessageFlags.IsComponentsV2,
+    };
+  }
+
+  _resultBuilder(text) {
+    const b = new CV2Builder();
+    if (this.color) b.setColor(this.color);
+    b.addText(text);
+    return b;
   }
 }
 

@@ -1,78 +1,91 @@
 'use strict';
 
 const CV2Builder = require('./CV2Builder');
-const { MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder } = require('discord.js');
+const { MessageFlags } = require('discord.js');
+const { uniqueId } = require('../utils/index');
 
 /**
- * FlowCV2 — multi-step interaction flow manager
- * Manage setup wizards, onboarding, multi-step forms using CV2
+ * FlowCV2 — advanced multi-step interaction flow manager
  *
- * @example
- * const flow = new FlowCV2({ userId: interaction.user.id });
- * flow
- *   .addStep('welcome', async (i, data) => {
- *     // show welcome screen, return next step trigger
- *   })
- *   .addStep('config', async (i, data) => {
- *     // show config screen
- *   });
- * await flow.start(interaction);
+ * Features:
+ * - Named steps with conditional routing (goto)
+ * - Persistent data store across steps
+ * - Global before/after hooks
+ * - Flow timeout with cleanup
+ * - Step history / back navigation
+ * - Error boundary per step
  */
 class FlowCV2 {
   /**
-   * @param {object} options
-   * @param {string} options.userId - User running the flow
-   * @param {number} [options.timeout=300000] - Total flow timeout (5 min default)
-   * @param {number|string} [options.color]
-   * @param {boolean} [options.ephemeral=true]
+   * @param {object} opts
+   * @param {string} opts.userId
+   * @param {number} [opts.timeout=300000]
+   * @param {number|string} [opts.color]
+   * @param {boolean} [opts.ephemeral=true]
+   * @param {Function} [opts.onError] - (err, step, flow) => void
+   * @param {Function} [opts.onComplete] - (data, flow) => void
+   * @param {Function} [opts.onAbort] - (reason, flow) => void
    */
-  constructor(options = {}) {
-    if (!options.userId) throw new TypeError('FlowCV2: userId is required');
+  constructor(opts = {}) {
+    if (!opts.userId) throw new TypeError('FlowCV2: userId is required');
 
-    this.userId = options.userId;
-    this.timeout = options.timeout ?? 300_000;
-    this.color = options.color ?? null;
-    this.ephemeral = options.ephemeral ?? true;
+    this.userId   = opts.userId;
+    this.timeout  = opts.timeout  ?? 300_000;
+    this.color    = opts.color    ?? null;
+    this.ephemeral = opts.ephemeral ?? true;
+    this.onError    = opts.onError    ?? null;
+    this.onComplete = opts.onComplete ?? null;
+    this.onAbort    = opts.onAbort    ?? null;
 
-    this._steps = new Map();
-    this._stepOrder = [];
-    this._data = {};
-    this._currentStep = 0;
-    this._id = `flow_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-    this._interaction = null;
-    this._message = null;
-    this._resolve = null;
-    this._reject = null;
-    this._timer = null;
+    this._steps    = new Map(); // name → handler
+    this._order    = [];
+    this._data     = {};
+    this._history  = [];
+    this._current  = 0;
+    this._id       = uniqueId('flow');
+    this._timer    = null;
+    this._resolve  = null;
+    this._reject   = null;
+    this._started  = false;
   }
 
+  // ─── API ───────────────────────────────────────────────────────────────────
+
   /**
-   * Add a step to the flow
-   * @param {string} name - Step name
-   * @param {Function} handler - async (interaction, data, flow) => void
+   * Register a step
+   * @param {string} name
+   * @param {Function} handler - async (i, data, flow) => void
    */
   addStep(name, handler) {
-    if (typeof handler !== 'function') throw new TypeError(`FlowCV2#addStep: handler for "${name}" must be a function`);
+    if (typeof handler !== 'function') {
+      throw new TypeError(`FlowCV2#addStep "${name}": handler must be a function`);
+    }
+    if (this._steps.has(name)) {
+      throw new Error(`FlowCV2#addStep: step "${name}" already registered`);
+    }
     this._steps.set(name, handler);
-    this._stepOrder.push(name);
+    this._order.push(name);
     return this;
   }
 
   /**
    * Start the flow
    * @param {import('discord.js').ChatInputCommandInteraction} interaction
-   * @returns {Promise<object>} Collected data from all steps
+   * @returns {Promise<object>} collected data
    */
   async start(interaction) {
-    this._interaction = interaction;
+    if (this._started) throw new Error('FlowCV2: already started');
+    this._started = true;
+    this._current = 0;
 
     return new Promise(async (resolve, reject) => {
       this._resolve = resolve;
       this._reject = reject;
 
-      this._timer = setTimeout(() => {
+      this._timer = setTimeout(async () => {
         this._reject(new Error('FlowCV2: timed out'));
-        this._sendTimedOut();
+        if (this.onAbort) await this.onAbort('timeout', this);
+        await this._sendTimedOut(interaction).catch(() => {});
       }, this.timeout);
 
       await this._runStep(interaction, 0);
@@ -80,90 +93,155 @@ class FlowCV2 {
   }
 
   /**
-   * Advance to the next step (call from within a step handler)
-   * @param {import('discord.js').ButtonInteraction} interaction
-   * @param {object} [stepData] - Data collected in this step
+   * Advance to the next step (auto)
    */
   async next(interaction, stepData = {}) {
     Object.assign(this._data, stepData);
-    this._currentStep++;
+    this._history.push(this._current);
+    this._current++;
 
-    if (this._currentStep >= this._stepOrder.length) {
-      clearTimeout(this._timer);
-      this._resolve(this._data);
-      return;
+    if (this._current >= this._order.length) {
+      return this._finish(interaction);
     }
 
-    await this._runStep(interaction, this._currentStep);
+    await this._runStep(interaction, this._current);
   }
 
   /**
-   * Abort the flow early
-   * @param {import('discord.js').ButtonInteraction} interaction
-   * @param {string} [reason='Cancelled']
+   * Jump to a specific named step
+   */
+  async goto(interaction, stepName, stepData = {}) {
+    const idx = this._order.indexOf(stepName);
+    if (idx === -1) throw new Error(`FlowCV2#goto: step "${stepName}" not found`);
+    Object.assign(this._data, stepData);
+    this._history.push(this._current);
+    this._current = idx;
+    await this._runStep(interaction, idx);
+  }
+
+  /**
+   * Go back to the previous step
+   */
+  async back(interaction) {
+    if (this._history.length === 0) return;
+    this._current = this._history.pop();
+    await this._runStep(interaction, this._current);
+  }
+
+  /**
+   * Finish the flow manually
+   */
+  async finish(interaction, finalData = {}) {
+    Object.assign(this._data, finalData);
+    await this._finish(interaction);
+  }
+
+  /**
+   * Abort the flow
    */
   async abort(interaction, reason = 'Cancelled') {
     clearTimeout(this._timer);
-    const builder = this._baseBuilder().addText(`❌ ${reason}`);
-    await this._update(interaction, builder);
+    const b = this._base().addText(`❌ ${reason}`);
+    await this._update(interaction, b);
+    if (this.onAbort) await this.onAbort(reason, this);
     this._reject(new Error(`FlowCV2 aborted: ${reason}`));
   }
 
-  /**
-   * Get current collected data
-   */
-  getData() {
-    return { ...this._data };
-  }
+  // ─── Data helpers ─────────────────────────────────────────────────────────
+
+  /** Get a copy of collected data */
+  getData() { return { ...this._data }; }
+
+  /** Set a value in data store */
+  set(key, value) { this._data[key] = value; return this; }
+
+  /** Get a value from data store */
+  get(key) { return this._data[key]; }
+
+  /** Unique ID prefix for customIds */
+  getId() { return this._id; }
+
+  /** Current step name */
+  get currentStep() { return this._order[this._current]; }
+
+  /** Current step index */
+  get currentIndex() { return this._current; }
+
+  /** Total steps */
+  get totalSteps() { return this._order.length; }
+
+  /** Step progress (0.0 → 1.0) */
+  get progress() { return this._order.length > 0 ? this._current / this._order.length : 0; }
 
   /**
-   * Get the unique flow ID prefix (use for customId in buttons)
+   * Build a progress bar text
+   * @param {number} [width=10]
    */
-  getId() {
-    return this._id;
+  progressBar(width = 10) {
+    const filled = Math.round(this.progress * width);
+    return '█'.repeat(filled) + '░'.repeat(width - filled) +
+      ` ${this._current}/${this._order.length}`;
   }
 
-  // ─── Helpers ─────────────────────────────────────────────────────────────────
+  // ─── Utility builders ─────────────────────────────────────────────────────
 
-  _baseBuilder() {
+  /** Create a base CV2Builder with flow color applied */
+  _base() {
     const b = new CV2Builder();
     if (this.color) b.setColor(this.color);
     return b;
   }
 
+  async _update(interaction, builder) {
+    const payload = {
+      components: [builder.build()],
+      flags: this.ephemeral
+        ? MessageFlags.IsComponentsV2 | MessageFlags.Ephemeral
+        : MessageFlags.IsComponentsV2,
+    };
+    try {
+      if (interaction.isButton?.() || interaction.isStringSelectMenu?.()) {
+        if (!interaction.deferred && !interaction.replied) {
+          await interaction.update(payload);
+        } else {
+          await interaction.editReply(payload);
+        }
+      } else {
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply(payload);
+        } else {
+          await interaction.reply(payload);
+        }
+      }
+    } catch (err) {
+      if (err.code !== 10062) throw err;
+    }
+  }
+
   async _runStep(interaction, index) {
-    const name = this._stepOrder[index];
+    const name = this._order[index];
     const handler = this._steps.get(name);
     try {
       await handler(interaction, this._data, this);
     } catch (err) {
-      clearTimeout(this._timer);
-      this._reject(err);
-    }
-  }
-
-  async _update(interaction, builder) {
-    const payload = {
-      components: [builder.build()],
-      flags: MessageFlags.IsComponentsV2,
-    };
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply(payload);
-    } else {
-      await interaction.update(payload);
-    }
-  }
-
-  async _sendTimedOut() {
-    try {
-      const builder = this._baseBuilder().addText('-# ⏱ This flow has timed out.');
-      if (this._message) {
-        await this._message.edit({
-          components: [builder.build()],
-          flags: MessageFlags.IsComponentsV2,
-        });
+      if (this.onError) {
+        await this.onError(err, name, this);
+      } else {
+        clearTimeout(this._timer);
+        this._reject(err);
       }
-    } catch (_) {}
+    }
+  }
+
+  async _finish(interaction) {
+    clearTimeout(this._timer);
+    if (this.onComplete) await this.onComplete(this._data, this);
+    this._resolve(this._data);
+  }
+
+  async _sendTimedOut(interaction) {
+    const b = this._base().addText('-# ⏱ This flow has timed out.');
+    await this._update(interaction, b).catch(() => {});
   }
 }
 

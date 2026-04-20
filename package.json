@@ -1,13 +1,19 @@
 {
   "name": "discord.js-v2",
-  "version": "1.0.0",
-  "description": "Production-ready Components V2 utilities for Discord.js v14 bots — typed builders, presets, pagination, modals, and flow helpers.",
+  "version": "2.0.0",
+  "description": "Advanced production-ready Components V2 toolkit for Discord.js v14 — builders, pagination, flows, forms, modals, presets, caching and more.",
   "main": "src/index.js",
   "types": "src/index.d.ts",
   "exports": {
     ".": {
       "require": "./src/index.js",
       "types": "./src/index.d.ts"
+    },
+    "./presets": {
+      "require": "./src/presets/index.js"
+    },
+    "./utils": {
+      "require": "./src/utils/index.js"
     }
   },
   "scripts": {
@@ -22,6 +28,8 @@
     "discord-bot",
     "builder",
     "pagination",
+    "forms",
+    "wizard",
     "utility"
   ],
   "author": "kopeekool",
