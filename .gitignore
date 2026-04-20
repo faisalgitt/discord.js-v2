@@ -2,3 +2,4 @@ tests/
 node_modules/
 .github/
 *.test.js
+node_modules/
